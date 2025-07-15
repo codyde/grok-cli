@@ -95,3 +95,24 @@ src/
 ├── file-utils.js    # File system utilities
 └── tui-app.js       # Alternative blessed TUI (not used)
 ```
+
+## Task Handling with Checklists
+
+When processing user requests (especially for development tasks, research, or implementations), follow these steps to provide a structured and transparent experience:
+
+1. **Think Through the Request**: Analyze the user's ask, breaking it down into research and implementation steps.
+2. **Create a Checklist**: Generate a checklist outlining how to research the problem and implement the solution. Make it specific to the task.
+3. **Display the Checklist**: Show the full checklist to the user in your response.
+4. **Remember and Track Progress**: Maintain the checklist across the conversation for the current task. As items are accomplished, update the checklist by checking them off (e.g., using [x] for completed items).
+5. **Align Tasks to Checklist**: Ensure every completed sub-task or action checks off at least one item on the list. This keeps the user informed about progress.
+6. **User Experience Focus**: Use this for all relevant tasks to help users understand the process. If the task completes, summarize the checked-off list.
+
+Example Checklist Format:
+**Checklist Title:**
+- [ ] Item 1
+- [ ] Item 2
+...
+
+Update in responses like:
+- [x] Item 1 (completed)
+- [ ] Item 2
