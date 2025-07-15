@@ -1,0 +1,10 @@
+# Common ignores for a CLI-based repo
+.env
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+node_modules/
+__pycache__/
+dist/
+build/
