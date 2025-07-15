@@ -176,6 +176,7 @@ const App = () => {
   const [abortController, setAbortController] = useState(null);
   
   const grokClientRef = useRef(new GrokClient());
+  const searchTimeout = useRef(null);
 
   // Enhanced cleanup for edge cases
   useEffect(() => {
@@ -280,9 +281,13 @@ const App = () => {
     }
   });
 
-  // Update file search and command search when input changes
+  // Debounced update for file search and command search
   useEffect(() => {
-    const updateSearch = async () => {
+    if (searchTimeout.current) {
+      clearTimeout(searchTimeout.current);
+    }
+
+    searchTimeout.current = setTimeout(async () => {
       const atIndex = input.lastIndexOf('@');
       const slashIndex = input.lastIndexOf('/');
       
@@ -320,9 +325,13 @@ const App = () => {
         setCommandSearchActive(false);
         setCommandSearchQuery('');
       }
-    };
+    }, 300); // 300ms debounce
 
-    updateSearch();
+    return () => {
+      if (searchTimeout.current) {
+        clearTimeout(searchTimeout.current);
+      }
+    };
   }, [input]);
 
   const addMessage = (role, content) => {
@@ -465,21 +474,14 @@ const App = () => {
 
       const allMessages = [systemMessage, ...conversationHistory];
 
-      // Use native XAI streaming
+      // Use native XAI streaming with batched updates
       try {
         const streamGenerator = grokClientRef.current.streamWithTools(allMessages, controller.signal);
         let responseContent = '';
         
-        for await (const chunk of streamGenerator) {
-          // Check if we were aborted
-          if (controller.signal.aborted) {
-            break;
-          }
-          
-          if (chunk) {
-            responseContent += chunk;
-            
-            // Update the thinking message in real-time
+        // Set up interval for batched updates
+        const updateInterval = setInterval(() => {
+          if (responseContent) {
             setMessages(prev => {
               const updated = [...prev];
               const lastMessage = updated[updated.length - 1];
@@ -490,7 +492,30 @@ const App = () => {
               return updated;
             });
           }
+        }, 200); // Update every 200ms
+
+        for await (const chunk of streamGenerator) {
+          // Check if we were aborted
+          if (controller.signal.aborted) {
+            break;
+          }
+          
+          if (chunk) {
+            responseContent += chunk;
+          }
         }
+        
+        // Clear interval and do final update
+        clearInterval(updateInterval);
+        setMessages(prev => {
+          const updated = [...prev];
+          const lastMessage = updated[updated.length - 1];
+          if (THINKING_MESSAGES.includes(lastMessage.content) || 
+              lastMessage.role === 'assistant') {
+            updated[updated.length - 1].content = responseContent;
+          }
+          return updated;
+        });
         
       } catch (streamError) {
         // Update thinking message with error
