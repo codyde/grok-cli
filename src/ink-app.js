@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import React, { useState, useEffect, useRef } from 'react';
-import { Box, Text, useInput, useApp } from 'ink';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Box, Text, useInput, useApp, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
 import SelectInput from 'ink-select-input';
 import { GrokClient } from './api.js';
@@ -15,8 +15,10 @@ const { logger } = Sentry;
 
 const { createElement: h } = React;
 
-// Chat Message Component
-const ChatMessage = ({ message, isStreaming }) => {
+// Chat Message Lines Generator
+const getMessageLines = (message, isLast, isStreaming) => {
+  const lines = [];
+  
   const timestamp = message.timestamp.toLocaleTimeString('en-US', {
     hour12: false,
     hour: '2-digit',
@@ -28,30 +30,44 @@ const ChatMessage = ({ message, isStreaming }) => {
   const displayRole = message.role === 'assistant' ? 'Grok' : (message.role === 'system' ? 'System' : message.role);
   
   let displayContent = message.content;
-  // Display the thinking message if it's currently streaming and content matches any thinking message
-  if (isStreaming && THINKING_MESSAGES.includes(message.content)) {
-    displayContent = message.content;
+  
+  // Special handling for thinking messages during streaming
+  if (isLast && isStreaming && THINKING_MESSAGES.includes(displayContent)) {
+    displayContent = message.content; // Already set, but can add animation if desired
   }
 
-  // Special styling for welcome message with ASCII art
+  lines.push({ type: 'text', text: `[${timestamp}] `, color: 'gray', bold: false });
+  lines.push({ type: 'text', text: `${displayRole}:`, color: roleColor, bold: true });
+
+  const contentColor = message.isWelcome ? 'whiteBright' : undefined; // undefined for default
+  const contentBold = message.isWelcome;
+  const contentLines = displayContent.split('\n');
+  contentLines.forEach(line => {
+    if (line.trim() === '') {
+      lines.push({ type: 'spacer' });
+    } else {
+      lines.push({ type: 'text', text: line, color: contentColor, bold: contentBold });
+    }
+  });
+
+  // Add separator for system messages
+  if (message.role === 'system') {
+    lines.push({ type: 'text', text: '---', color: 'gray', bold: false });
+  }
+
+  // Add extra spacing: one blank line between messages, two after welcome/banner
+  lines.push({ type: 'spacer' });
   if (message.isWelcome) {
-    return h(Box, { flexDirection: 'column', marginBottom: 1 },
-      h(Text, { color: 'gray' }, `[${timestamp}] `),
-      h(Text, { color: roleColor, bold: true }, `${displayRole}:`),
-      h(Text, { color: 'whiteBright', bold: true }, displayContent)
-    );
+    lines.push({ type: 'spacer' });
   }
 
-  return h(Box, { flexDirection: 'column', marginBottom: 1 },
-    h(Text, { color: 'gray' }, `[${timestamp}] `),
-    h(Text, { color: roleColor, bold: true }, `${displayRole}:`),
-    h(Text, null, displayContent)
-  );
+  return lines;
 };
 
-// File Search Component
+// File Search Component (limited to 5 results)
 const FileSearch = ({ results, query, onSelect }) => {
-  const items = results.map((file) => ({
+  const displayedResults = results.slice(0, 5);
+  const items = displayedResults.map((file) => ({
     label: file,
     value: file
   }));
@@ -60,32 +76,60 @@ const FileSearch = ({ results, query, onSelect }) => {
     h(Text, { color: 'yellow' }, `Files matching: ${query}`),
     items.length > 0 
       ? h(SelectInput, { items, onSelect })
-      : h(Text, { color: 'yellow' }, 'No files found')
+      : h(Text, { color: 'yellow' }, 'No files found'),
+    results.length > 5 && h(Text, { color: 'yellow' }, `+ ${results.length - 5} more, refine your query...`)
   );
 };
 
-// Main Chat Display Component
-const ChatDisplay = ({ messages, scrollOffset, isStreaming }) => {
-  const totalMessages = messages.length;
-  const displayMessages = scrollOffset === 0 
-    ? messages 
-    : messages.slice(0, totalMessages - scrollOffset);
+// Main Chat Display Component with line-based scrolling
+const ChatDisplay = ({ messages, scrollOffset, setScrollOffset, isStreaming }) => {
+  const { stdout } = useStdout();
+  const terminalHeight = stdout.rows || 24;
+  const viewportHeight = Math.max(5, terminalHeight - 15); // Conservative estimate to avoid overflow
 
-  const title = scrollOffset > 0 
-    ? `Chat (↑ ${scrollOffset} messages from bottom) - ${displayMessages.length}/${totalMessages}`
-    : `Chat (auto-scroll) - ${totalMessages} messages`;
+  const prevTotalLines = useRef(0);
 
-  return h(Box, { borderStyle: 'single', borderColor: 'cyan', padding: 1, flexDirection: 'column', flexGrow: 1 },
-    h(Text, { color: 'cyan' }, title),
-    h(Box, { flexDirection: 'column', flexGrow: 1 },
-      ...displayMessages.map((message, index) =>
-        h(ChatMessage, { 
-          key: `${message.timestamp.getTime()}-${index}`,
-          message, 
-          isStreaming: isStreaming && index === displayMessages.length - 1 && scrollOffset === 0
-        })
-      )
-    )
+  const allLines = useMemo(() => {
+    let lines = [];
+    messages.forEach((message, index) => {
+      const isLast = index === messages.length - 1;
+      lines = lines.concat(getMessageLines(message, isLast, isStreaming));
+    });
+    return lines;
+  }, [messages, isStreaming]);
+
+  const totalLines = allLines.length;
+
+  // Adjust scroll offset when new lines are added (e.g., during streaming)
+  useEffect(() => {
+    if (scrollOffset > 0) {
+      const delta = totalLines - prevTotalLines.current;
+      if (delta > 0) {
+        setScrollOffset(prev => prev + delta);
+      }
+    }
+    prevTotalLines.current = totalLines;
+  }, [totalLines, scrollOffset, setScrollOffset]);
+
+  const maxOffset = Math.max(0, totalLines - viewportHeight);
+  const effectiveOffset = Math.min(Math.max(0, scrollOffset), maxOffset);
+  const startLine = totalLines - viewportHeight - effectiveOffset;
+  const actualStart = Math.max(0, startLine);
+  const visibleLines = allLines.slice(actualStart, actualStart + viewportHeight);
+
+  return h(Box, { flexDirection: 'column', flexGrow: 1, paddingLeft: 2 },
+    ...visibleLines.map((line, index) => {
+      const key = `${actualStart + index}`;
+      if (line.type === 'spacer') {
+        return h(Box, { key, height: 1 });
+      } else {
+        return h(Text, { 
+          key,
+          color: line.color,
+          bold: line.bold
+        }, line.text);
+      }
+    })
   );
 };
 
@@ -158,6 +202,9 @@ const THINKING_MESSAGES = [
 // Main App Component
 const App = () => {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const terminalHeight = stdout.rows || 24;
+  const viewportHeight = Math.max(5, terminalHeight - 15); // Used for page navigation
   
   const initialWelcome = {
     role: 'assistant',
@@ -271,23 +318,23 @@ const App = () => {
     }
     
     if (key.upArrow && !fileSearchActive && !commandSearchActive) {
-      setScrollOffset(prev => Math.min(messages.length - 1, prev + 1));
+      setScrollOffset(prev => prev + 1);
     }
     
     if (key.downArrow && !fileSearchActive && !commandSearchActive) {
-      setScrollOffset(prev => Math.max(0, prev - 1));
+      setScrollOffset(prev => prev - 1);
     }
     
     if (key.pageUp) {
-      setScrollOffset(prev => Math.min(messages.length - 1, prev + 10));
+      setScrollOffset(prev => prev + viewportHeight);
     }
     
     if (key.pageDown) {
-      setScrollOffset(prev => Math.max(0, prev - 10));
+      setScrollOffset(prev => prev - viewportHeight);
     }
     
     if (key.home) {
-      setScrollOffset(messages.length - 1);
+      setScrollOffset(Infinity);
     }
     
     if (key.end) {
@@ -485,8 +532,8 @@ const App = () => {
       const systemMessage = {
         role: 'system',
         content: processedInput.includes('File:')
-          ? 'You are Grok, a helpful AI built by xAI with access to file system tools. You can list files, read files, and write files on the local system. When analyzing files or code, provide your analysis and then ALWAYS end your response with a brief closing message that encourages the user to continue the conversation.'
-          : 'You are Grok, a helpful AI built by xAI with access to file system tools. You can list files, read files, and write files on the local system to help with development tasks. Use your tools when appropriate to help the user. At the end of each response, include a brief closing message that encourages the user to continue the conversation.'
+          ? 'You are Grok, a helpful AI built by xAI with access to file system tools. You can list files, read files, and write files on the local system. When analyzing files or code, provide your analysis and then ALWAYS end your response with a brief closing message that encourages the user to continue the conversation. For multi-step tasks, structure your thinking and responses using markdown task lists with checkboxes. Mark completed steps with ✅.'
+          : 'You are Grok, a helpful AI built by xAI with access to file system tools. You can list files, read files, and write files on the local system to help with development tasks. Use your tools when appropriate to help the user. At the end of each response, include a brief closing message that encourages the user to continue the conversation. For multi-step tasks, structure your thinking and responses using markdown task lists with checkboxes. Mark completed steps with ✅.'
       };
 
       // Get all messages except thinking messages and use processedInput for current user message
@@ -588,7 +635,8 @@ const App = () => {
   return h(Box, { flexDirection: 'column', height: '100vh', width: '100%' },
     h(ChatDisplay, { 
       messages, 
-      scrollOffset, 
+      scrollOffset,
+      setScrollOffset,
       isStreaming
     }),
     
