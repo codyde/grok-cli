@@ -4,6 +4,9 @@ import os from 'os';
 import { promisify } from 'util';
 import { exec } from 'child_process';
 import debugLogger from './debug-logger.js';
+import * as Sentry from '@sentry/node';
+
+const { logger } = Sentry;
 
 export class GrokClient {
   constructor() {
@@ -15,11 +18,13 @@ export class GrokClient {
     this.baseURL = 'https://api.x.ai/v1';
     this.tempDir = null;
     this.toolResultsCache = new Map(); // Cache for large tool results
+    logger.info('GrokClient initialized', { apiKeySet: true });
   }
 
   async initTempDir() {
     if (!this.tempDir) {
       this.tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grok-cli-'));
+      logger.debug(logger.fmt`Initialized temporary directory: ${this.tempDir}`);
     }
     return this.tempDir;
   }
@@ -28,15 +33,18 @@ export class GrokClient {
     if (this.tempDir) {
       try {
         await fs.rm(this.tempDir, { recursive: true, force: true });
+        logger.info('Cleaned up temporary directory', { path: this.tempDir });
         this.tempDir = null;
         this.toolResultsCache.clear();
       } catch (error) {
+        logger.error('Failed to cleanup temp directory', { error: error.message });
         console.warn('Failed to cleanup temp directory:', error.message);
       }
     }
   }
 
   getTools() {
+    logger.trace('Fetching available tools');
     return [
       {
         type: 'function',
@@ -129,6 +137,7 @@ export class GrokClient {
       const functionName = toolCall.function.name;
       const args = JSON.parse(toolCall.function.arguments);
       
+      logger.info('Executing tool call', { functionName, args });
       let result;
       let summary = null;
       
@@ -160,6 +169,7 @@ export class GrokClient {
             const filePath = args.path || 'unknown';
             
             summary = `📄 Read file: ${filePath} (${fileSize} bytes, ${lineCount} lines)\n[Full content cached for AI analysis]`;
+            logger.info('Read large file, summary created', { filePath, fileSize, lineCount });
             result = summary;
           }
           break;
@@ -171,6 +181,7 @@ export class GrokClient {
           result = `Unknown tool: ${functionName}`;
       }
       
+      logger.info('Tool call executed successfully', { functionName });
       return {
         tool_call_id: toolCall.id,
         role: 'tool',
@@ -179,6 +190,7 @@ export class GrokClient {
         _cached: summary !== null // Flag to indicate if full content is cached
       };
     } catch (error) {
+      logger.error('Error executing tool call', { error: error.message });
       return {
         tool_call_id: toolCall.id,
         role: 'tool',
@@ -194,6 +206,7 @@ export class GrokClient {
       const stats = await fs.stat(fullPath);
       
       if (!stats.isDirectory()) {
+        logger.warn('Path is not a directory', { path: fullPath });
         return `Path "${fullPath}" is not a directory`;
       }
 
@@ -202,6 +215,7 @@ export class GrokClient {
       const sorted = filtered.sort((a, b) => a.name.localeCompare(b.name));
       
       if (sorted.length === 0) {
+        logger.info('Directory is empty', { path: fullPath, showHidden });
         return `Directory ${fullPath} appears to be empty (showing ${showHidden ? 'all files' : 'non-hidden files only'})`;
       }
       
@@ -211,8 +225,10 @@ export class GrokClient {
         result += `${icon} ${entry.name}\n`;
       }
       
+      logger.info('Listed files in directory', { path: fullPath, fileCount: sorted.length });
       return result;
     } catch (error) {
+      logger.error('Error listing files', { error: error.message });
       return `Error listing files: ${error.message}`;
     }
   }
@@ -228,8 +244,10 @@ export class GrokClient {
       // Write the file
       await fs.writeFile(fullPath, content, 'utf8');
       
+      logger.info('File written successfully', { path: fullPath, contentLength: content.length });
       return `Successfully wrote ${content.length} bytes to ${fullPath}`;
     } catch (error) {
+      logger.error('Error writing file', { error: error.message });
       return `Error writing file: ${error.message}`;
     }
   }
@@ -239,8 +257,10 @@ export class GrokClient {
       const fullPath = path.resolve(filePath);
       const content = await fs.readFile(fullPath, 'utf8');
       
+      logger.info('File read successfully', { path: fullPath, contentLength: content.length });
       return `Contents of ${fullPath}:\n${content}`;
     } catch (error) {
+      logger.error('Error reading file', { error: error.message });
       return `Error reading file: ${error.message}`;
     }
   }
@@ -249,8 +269,10 @@ export class GrokClient {
     try {
       const execPromise = promisify(exec);
       const { stdout, stderr } = await execPromise(command, { cwd: workingDir, timeout: timeout * 1000 });
+      logger.info('Shell command executed', { command, workingDir });
       return `Executed "${command}" in ${workingDir}:\nStdout: ${stdout}\nStderr: ${stderr}\nExit code: 0`;
     } catch (error) {
+      logger.error('Error executing shell command', { command, error: error.message });
       return `Error executing "${command}" in ${workingDir}:\nStdout: ${error.stdout || ''}\nStderr: ${error.stderr || ''}\nExit code: ${error.code || 1}\nError: ${error.message}`;
     }
   }
@@ -262,6 +284,7 @@ export class GrokClient {
     for (const modelName of modelNames) {
       try {
         debugLogger.info(`🔍 Trying model: ${modelName}`);
+        logger.debug(logger.fmt`Attempting to use model: ${modelName}`);
         
         const requestBody = {
           model: modelName,
@@ -286,10 +309,12 @@ export class GrokClient {
         if (!response.ok) {
           const errorData = await response.text();
           debugLogger.error(`❌ Model ${modelName} error:`, errorData);
+          logger.error('API request failed', { model: modelName, status: response.status, error: errorData });
           
           // If it's a 503 or model unavailable, try next model
           if (response.status === 503 || errorData.includes('unavailable')) {
             debugLogger.warn(`⏭️  Model ${modelName} unavailable, trying next...`);
+            logger.warn('Model unavailable, retrying with next', { model: modelName });
             continue;
           }
           
@@ -298,16 +323,19 @@ export class GrokClient {
 
         const data = await response.json();
         debugLogger.info(`✅ Successfully using model: ${modelName}`);
+        logger.info('API request successful', { model: modelName });
         return {
           content: data.choices[0].message.content,
           toolCalls: data.choices[0].message.tool_calls || []
         };
       } catch (error) {
         debugLogger.error(`❌ Failed with model ${modelName}:`, error.message);
+        logger.error('Model attempt failed', { model: modelName, error: error.message });
         // Continue to next model
       }
     }
     
+    logger.fatal('All models failed or are unavailable');
     throw new Error('All models failed or are unavailable');
   }
 
@@ -315,10 +343,12 @@ export class GrokClient {
     try {
       let currentMessages = [...messages];
       let iterationCount = 0;
-      const maxIterations = 10; // Safety limit to prevent infinite loops
+      const maxIterations = 25; // Safety limit to prevent infinite loops
       
+      logger.info('Starting streaming with tools', { messageCount: messages.length });
       while (iterationCount < maxIterations) {
         if (abortSignal && abortSignal.aborted) {
+          logger.warn('Streaming aborted by signal');
           break;
         }
         
@@ -329,6 +359,7 @@ export class GrokClient {
         // If there are tool calls, execute them
         if (toolCalls && toolCalls.length > 0) {
           yield `🔧 Executing ${toolCalls.length} tool call(s)... (iteration ${iterationCount + 1})\n\n`;
+          logger.info('Executing tool calls', { count: toolCalls.length, iteration: iterationCount + 1 });
           
           // Execute all tool calls
           const toolResults = [];
@@ -336,6 +367,7 @@ export class GrokClient {
           
           for (const toolCall of toolCalls) {
             if (abortSignal && abortSignal.aborted) {
+              logger.warn('Tool execution aborted');
               break;
             }
             const result = await this.executeToolCall(toolCall);
@@ -357,6 +389,7 @@ export class GrokClient {
           }
           
           if (abortSignal && abortSignal.aborted) {
+            logger.warn('Streaming aborted after tool execution');
             break;
           }
           
@@ -375,9 +408,11 @@ export class GrokClient {
           iterationCount++;
         } else {
           // No more tool calls, stream the final response
+          logger.info('No more tool calls, streaming final response');
           if (content) {
             for (const char of content) {
               if (abortSignal && abortSignal.aborted) {
+                logger.warn('Streaming content aborted');
                 break;
               }
               yield char;
@@ -390,10 +425,12 @@ export class GrokClient {
       // Safety check: if we hit max iterations, provide a final response
       if (iterationCount >= maxIterations) {
         yield `\n\n⚠️ Reached maximum tool call iterations (${maxIterations}). Providing summary...\n\n`;
+        logger.warn('Reached maximum tool call iterations', { maxIterations });
         const finalResult = await this.chat(currentMessages, false, abortSignal); // No tools for final response
         if (finalResult.content) {
           for (const char of finalResult.content) {
             if (abortSignal && abortSignal.aborted) {
+              logger.warn('Final streaming aborted');
               break;
             }
             yield char;
@@ -402,6 +439,7 @@ export class GrokClient {
       }
     } catch (error) {
       console.error('Streaming API error:', error);
+      logger.error('Streaming API error', { error: error.message });
       throw new Error(`Streaming API error: ${error.message}`);
     }
   }
@@ -413,6 +451,7 @@ export class GrokClient {
     for (const modelName of modelNames) {
       try {
         debugLogger.info(`🔍 Trying streaming model: ${modelName}`);
+        logger.debug(logger.fmt`Attempting streaming with model: ${modelName}`);
         
         const requestBody = {
           model: modelName,
@@ -434,10 +473,12 @@ export class GrokClient {
         if (!response.ok) {
           const errorData = await response.text();
           debugLogger.error(`❌ Streaming model ${modelName} error:`, errorData);
+          logger.error('Streaming API request failed', { model: modelName, status: response.status, error: errorData });
           
           // If it's a 503 or model unavailable, try next model
           if (response.status === 503 || errorData.includes('unavailable')) {
             debugLogger.warn(`⏭️  Streaming model ${modelName} unavailable, trying next...`);
+            logger.warn('Streaming model unavailable, retrying with next', { model: modelName });
             continue;
           }
           
@@ -445,6 +486,7 @@ export class GrokClient {
         }
 
         debugLogger.info(`✅ Successfully streaming with model: ${modelName}`);
+        logger.info('Streaming API request successful', { model: modelName });
         
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -453,6 +495,7 @@ export class GrokClient {
           // Check if we were aborted
           if (abortSignal && abortSignal.aborted) {
             reader.cancel();
+            logger.warn('Streaming reader cancelled due to abort signal');
             break;
           }
           
@@ -466,6 +509,7 @@ export class GrokClient {
             if (line.startsWith('data: ')) {
               const data = line.slice(6);
               if (data === '[DONE]') {
+                logger.info('Streaming completed');
                 return;
               }
 
@@ -477,19 +521,23 @@ export class GrokClient {
                 }
               } catch (e) {
                 // Skip malformed JSON
+                logger.warn('Skipped malformed JSON in stream', { line });
               }
             }
           }
         }
         
+        logger.info('Streaming completed normally');
         return; // Successfully completed streaming
         
       } catch (error) {
         debugLogger.error(`❌ Streaming failed with model ${modelName}:`, error.message);
+        logger.error('Streaming model attempt failed', { model: modelName, error: error.message });
         // Continue to next model
       }
     }
     
+    logger.fatal('All streaming models failed or are unavailable');
     throw new Error('All streaming models failed or are unavailable');
   }
 

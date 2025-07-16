@@ -9,6 +9,9 @@ import DebugWindow from './debug-window.js';
 import debugLogger from './debug-logger.js';
 import CommandSelector from './command-selector.js';
 import fs from 'node:fs/promises';
+import * as Sentry from '@sentry/node';
+
+const { logger } = Sentry;
 
 const { createElement: h } = React;
 
@@ -155,7 +158,7 @@ const App = () => {
   const { exit } = useApp();
   
   const initialWelcome = {
-    role: 'assistant',
+    role: 'Grok',
     content: GROK_ASCII + '\n\nWelcome to Grok CLI! Start typing to chat with Grok. Use @ to reference files.\n\n🔧 I have access to file system tools and can help you list, read, and write files when needed.',
     timestamp: new Date(),
     isWelcome: true
@@ -178,10 +181,13 @@ const App = () => {
   const grokClientRef = useRef(new GrokClient());
   const searchTimeout = useRef(null);
 
+  logger.info('Grok CLI App initialized');
+
   // Enhanced cleanup for edge cases
   useEffect(() => {
     const cleanup = async () => {
       await grokClientRef.current.cleanup();
+      logger.info('App cleanup performed');
     };
 
     const handleExit = () => {
@@ -189,6 +195,7 @@ const App = () => {
     };
 
     const handleError = (err) => {
+      logger.error('Uncaught exception', { error: err.message });
       console.error('Uncaught exception:', err);
       cleanup().finally(() => process.exit(1));
     };
@@ -214,16 +221,19 @@ const App = () => {
       grokClientRef.current.cleanup();
       process.stdout.write('\x1b[?1049l'); // Exit alternate screen buffer
       exit();
+      logger.info('App exited via Ctrl+C');
     }
     
     if (key.escape && fileSearchActive) {
       setFileSearchActive(false);
       setFileSearchResults([]);
+      logger.debug('File search closed via Escape');
     }
     
     if (key.escape && commandSearchActive) {
       setCommandSearchActive(false);
       setCommandSearchQuery('');
+      logger.debug('Command search closed via Escape');
     }
     
     // Handle double escape to cancel generation
@@ -245,6 +255,7 @@ const App = () => {
           }
           return updated;
         });
+        logger.warn('Generation cancelled by user');
       }
       
       setLastEscapeTime(now);
@@ -253,6 +264,7 @@ const App = () => {
     // Handle Tab key for file autocomplete
     if (key.tab && fileSearchActive && fileSearchResults.length > 0) {
       handleFileSelect({ value: fileSearchResults[0] });
+      logger.debug('File selected via Tab');
       return;
     }
     
@@ -303,11 +315,13 @@ const App = () => {
           
           const results = await FileUtils.searchFiles(query);
           setFileSearchResults(results);
+          logger.info('File search activated', { query, resultsCount: results.length });
         } else {
           setFileSearchActive(false);
           setFileSearchResults([]);
           setCommandSearchActive(false);
           setCommandSearchQuery('');
+          logger.debug('File search deactivated due to space in query');
         }
       } 
       // Check for command search (/)
@@ -317,6 +331,7 @@ const App = () => {
         setCommandSearchActive(true);
         setFileSearchActive(false);
         setFileSearchResults([]);
+        logger.info('Command search activated', { query });
       } 
       // No search active
       else {
@@ -324,6 +339,7 @@ const App = () => {
         setFileSearchResults([]);
         setCommandSearchActive(false);
         setCommandSearchQuery('');
+        logger.debug('No search active');
       }
     }, 300); // 300ms debounce
 
@@ -342,6 +358,7 @@ const App = () => {
     };
     setMessages(prev => [...prev, message]);
     setScrollOffset(0); // Auto-scroll to bottom
+    logger.debug(logger.fmt`Added message: ${role} - ${content.substring(0, 50)}`);
   };
 
   const handleFileSelect = (item) => {
@@ -355,15 +372,18 @@ const App = () => {
     }
     setFileSearchActive(false);
     setFileSearchResults([]);
+    logger.info('File selected', { fileName });
   };
 
   const handleCommandSelect = async (command) => {
     // Execute the command immediately
     if (command === 'debug') {
       setDebugWindowOpen(true);
+      logger.info('Debug command selected');
     } else if (command === 'clear') {
       setMessages([initialWelcome]);
       addMessage('system', 'Conversation history cleared.');
+      logger.info('Clear command executed');
     } else if (command === 'save') {
       try {
         const chatData = JSON.stringify(messages, (key, value) => {
@@ -372,8 +392,10 @@ const App = () => {
         }, 2);
         await fs.writeFile('grok-conversation.json', chatData);
         addMessage('system', 'Conversation saved to grok-conversation.json in the current directory.');
+        logger.info('Save command executed successfully');
       } catch (error) {
         addMessage('system', `Error saving conversation: ${error.message}`);
+        logger.error('Error saving conversation', { error: error.message });
       }
     }
     
@@ -389,6 +411,7 @@ const App = () => {
     }
 
     const userInput = input.trim();
+    logger.info('User input submitted', { input: userInput });
     
     // Handle slash commands (fallback for direct typing)
     if (userInput.startsWith('/')) {
@@ -398,11 +421,13 @@ const App = () => {
       if (command === 'debug') {
         setDebugWindowOpen(true);
         setInput('');
+        logger.info('/debug command executed');
         return;
       } else if (command === 'clear') {
         setMessages([initialWelcome]);
         addMessage('system', 'Conversation history cleared.');
         setInput('');
+        logger.info('/clear command executed');
         return;
       } else if (command === 'save') {
         try {
@@ -413,8 +438,10 @@ const App = () => {
           }, 2);
           await fs.writeFile(filename, chatData);
           addMessage('system', `Conversation saved to ${filename}.`);
+          logger.info('/save command executed', { filename });
         } catch (error) {
           addMessage('system', `Error saving conversation: ${error.message}`);
+          logger.error('Error in /save command', { error: error.message });
         }
         setInput('');
         return;
@@ -423,6 +450,7 @@ const App = () => {
       // Add more commands here in the future
       addMessage('system', `Unknown command: ${userInput}. Available commands: /debug, /clear, /save [filename]`);
       setInput('');
+      logger.warn('Unknown command', { command: userInput });
       return;
     }
 
@@ -433,6 +461,7 @@ const App = () => {
     setCommandSearchQuery('');
 
     setIsStreaming(true);
+    logger.info('Streaming started');
 
     // Create abort controller for this request
     const controller = new AbortController();
@@ -448,14 +477,14 @@ const App = () => {
       // Add thinking message with cycling/random selection
       const thinkingMessage = THINKING_MESSAGES[thinkingMessageIndex % THINKING_MESSAGES.length];
       setThinkingMessageIndex(prev => prev + 1);
-      addMessage('assistant', thinkingMessage);
+      addMessage('Grok', thinkingMessage);
       
       // Prepare messages for API - get clean conversation history
       const systemMessage = {
         role: 'system',
         content: processedInput.includes('File:')
-          ? 'You are a helpful AI assistant with access to file system tools. You can list files, read files, and write files on the local system. When analyzing files or code, provide your analysis and then ALWAYS end your response with a brief closing message that encourages the user to continue the conversation.'
-          : 'You are a helpful AI assistant with access to file system tools. You can list files, read files, and write files on the local system to help with development tasks. Use your tools when appropriate to help the user. At the end of each response, include a brief closing message that encourages the user to continue the conversation.'
+          ? 'You are Grok, a helpful AI built by xAI with access to file system tools. You can list files, read files, and write files on the local system. When analyzing files or code, provide your analysis and then ALWAYS end your response with a brief closing message that encourages the user to continue the conversation.'
+          : 'You are Grok, a helpful AI built by xAI with access to file system tools. You can list files, read files, and write files on the local system to help with development tasks. Use your tools when appropriate to help the user. At the end of each response, include a brief closing message that encourages the user to continue the conversation.'
       };
 
       // Get all messages except thinking messages and use processedInput for current user message
@@ -486,7 +515,7 @@ const App = () => {
               const updated = [...prev];
               const lastMessage = updated[updated.length - 1];
               if (THINKING_MESSAGES.includes(lastMessage.content) || 
-                  lastMessage.role === 'assistant') {
+                  lastMessage.role === 'Grok') {
                 updated[updated.length - 1].content = responseContent;
               }
               return updated;
@@ -497,6 +526,7 @@ const App = () => {
         for await (const chunk of streamGenerator) {
           // Check if we were aborted
           if (controller.signal.aborted) {
+            logger.warn('Streaming aborted during chunk processing');
             break;
           }
           
@@ -511,11 +541,12 @@ const App = () => {
           const updated = [...prev];
           const lastMessage = updated[updated.length - 1];
           if (THINKING_MESSAGES.includes(lastMessage.content) || 
-              lastMessage.role === 'assistant') {
+              lastMessage.role === 'Grok') {
             updated[updated.length - 1].content = responseContent;
           }
           return updated;
         });
+        logger.info('Streaming completed successfully');
         
       } catch (streamError) {
         // Update thinking message with error
@@ -524,6 +555,7 @@ const App = () => {
           updated[updated.length - 1].content = `Error during streaming: ${streamError.message}`;
           return updated;
         });
+        logger.error('Error during streaming', { error: streamError.message });
       }
 
     } catch (error) {
@@ -533,16 +565,21 @@ const App = () => {
         updated[updated.length - 1].content = `Error: ${error.message}`;
         return updated;
       });
+      logger.error('Error in handleSubmit', { error: error.message });
     } finally {
       setIsStreaming(false);
       setAbortController(null);
+      logger.info('Streaming ended');
     }
   };
 
   // Show debug window if open
   if (debugWindowOpen) {
     return h(DebugWindow, { 
-      onClose: () => setDebugWindowOpen(false) 
+      onClose: () => {
+        setDebugWindowOpen(false);
+        logger.info('Debug window closed');
+      }
     });
   }
 

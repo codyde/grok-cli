@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import '../instrument.js';
 import React from 'react';
 import { render } from 'ink';
 import dotenv from 'dotenv';

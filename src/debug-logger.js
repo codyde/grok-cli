@@ -1,8 +1,13 @@
+import * as Sentry from '@sentry/node';
+
+const { logger } = Sentry;
+
 class DebugLogger {
   constructor() {
     this.logs = [];
     this.isDebugMode = false;
     this.maxLogs = 1000; // Keep last 1000 logs
+    logger.info('DebugLogger initialized');
   }
 
   log(level, message, ...args) {
@@ -26,6 +31,9 @@ class DebugLogger {
       const originalConsole = console[level] || console.log;
       originalConsole(`[${timestamp}] ${message}`, ...args);
     }
+
+    // Log to Sentry as well
+    logger[level](message, ...args);
   }
 
   info(message, ...args) {
@@ -45,14 +53,17 @@ class DebugLogger {
   }
 
   getLogs() {
+    logger.debug('Retrieving debug logs', { count: this.logs.length });
     return [...this.logs];
   }
 
   clearLogs() {
+    logger.info('Clearing debug logs', { previousCount: this.logs.length });
     this.logs = [];
   }
 
   setDebugMode(enabled) {
+    logger.info('Setting debug mode', { enabled });
     this.isDebugMode = enabled;
   }
 }
