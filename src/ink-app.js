@@ -23,7 +23,9 @@ const ChatMessage = ({ message, isStreaming }) => {
     minute: '2-digit'
   });
 
-  const roleColor = message.role === 'user' ? 'cyan' : 'green';
+  const roleColor = message.role === 'user' ? 'cyan' : (message.role === 'system' ? 'yellow' : 'green');
+  
+  const displayRole = message.role === 'assistant' ? 'Grok' : (message.role === 'system' ? 'System' : message.role);
   
   let displayContent = message.content;
   // Display the thinking message if it's currently streaming and content matches any thinking message
@@ -35,14 +37,14 @@ const ChatMessage = ({ message, isStreaming }) => {
   if (message.isWelcome) {
     return h(Box, { flexDirection: 'column', marginBottom: 1 },
       h(Text, { color: 'gray' }, `[${timestamp}] `),
-      h(Text, { color: roleColor, bold: true }, `${message.role}:`),
+      h(Text, { color: roleColor, bold: true }, `${displayRole}:`),
       h(Text, { color: 'whiteBright', bold: true }, displayContent)
     );
   }
 
   return h(Box, { flexDirection: 'column', marginBottom: 1 },
     h(Text, { color: 'gray' }, `[${timestamp}] `),
-    h(Text, { color: roleColor, bold: true }, `${message.role}:`),
+    h(Text, { color: roleColor, bold: true }, `${displayRole}:`),
     h(Text, null, displayContent)
   );
 };
@@ -158,7 +160,7 @@ const App = () => {
   const { exit } = useApp();
   
   const initialWelcome = {
-    role: 'Grok',
+    role: 'assistant',
     content: GROK_ASCII + '\n\nWelcome to Grok CLI! Start typing to chat with Grok. Use @ to reference files.\n\n🔧 I have access to file system tools and can help you list, read, and write files when needed.',
     timestamp: new Date(),
     isWelcome: true
@@ -477,7 +479,7 @@ const App = () => {
       // Add thinking message with cycling/random selection
       const thinkingMessage = THINKING_MESSAGES[thinkingMessageIndex % THINKING_MESSAGES.length];
       setThinkingMessageIndex(prev => prev + 1);
-      addMessage('Grok', thinkingMessage);
+      addMessage('assistant', thinkingMessage);
       
       // Prepare messages for API - get clean conversation history
       const systemMessage = {
@@ -515,7 +517,7 @@ const App = () => {
               const updated = [...prev];
               const lastMessage = updated[updated.length - 1];
               if (THINKING_MESSAGES.includes(lastMessage.content) || 
-                  lastMessage.role === 'Grok') {
+                  lastMessage.role === 'assistant') {
                 updated[updated.length - 1].content = responseContent;
               }
               return updated;
@@ -541,7 +543,7 @@ const App = () => {
           const updated = [...prev];
           const lastMessage = updated[updated.length - 1];
           if (THINKING_MESSAGES.includes(lastMessage.content) || 
-              lastMessage.role === 'Grok') {
+              lastMessage.role === 'assistant') {
             updated[updated.length - 1].content = responseContent;
           }
           return updated;
